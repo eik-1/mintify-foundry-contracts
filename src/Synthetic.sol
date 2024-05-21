@@ -11,43 +11,63 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
     using FunctionsRequest for FunctionsRequest.Request;
     AggregatorV3Interface internal dataFeed;
 
+    // Custom error type
+    error UnexpectedRequestID(bytes32 requestId);
+
+    // State variables to store the last request ID, response, and error
     bytes32 public s_lastRequestId;
     bytes public s_lastResponse;
     bytes public s_lastError;
-    uint64 public subscriptionId;
     address public fetchData = address(this);
-    error UnexpectedRequestID(bytes32 requestId);
 
+    // Event to log responses
     event Response(
         bytes32 indexed requestId,
-        string price,
+        string character,
         bytes response,
         bytes err
     );
+
+    // event TokensMinted(address indexed minter, uint256 totalMintedTokens);
     event TokensMinted(address indexed user, uint256 amount, address token);
 
     address public router;
-    string public source;
+    uint64 public subscriptionId;
+    // JavaScript source code
+    string source =
+        "const ticker = args[0];"
+        "const apiResponse = await Functions.makeHttpRequest({"
+        "url: `https://chainlink-wine.vercel.app/api/alpha/${ticker}`"
+        "});"
+        "if (apiResponse.error) {"
+        "throw Error('Request failed');"
+        "}"
+        "const { data } = apiResponse;"
+        "const dataMultiplied = data * 100;"
+        "return Functions.encodeUint256(dataMultiplied);";
+
+    //Callback gas limit
     uint32 public gasLimit;
     bytes32 public donID;
-    string public price;
+    // State variable to store the returned character information
+    uint256 public price;
 
     mapping(address => uint256) public depositedAmount;
     mapping(address => MintableToken) public syntheticTokens;
     mapping(address => address[]) public walletToContractAddresses;
+    // uint256 public constant DEPOSIT_AMOUNT = 1 ether;
     uint256 public lastStockPrice;
-    uint256 constant OVER_COLLATERALIZATION_RATIO = 2;
+    uint256 constant OVER_COLLATERALIZATION_RATIO = 2; // 200% over-collateral
 
     constructor(
         uint64 _subId,
         address _router,
-        string memory _source,
         uint32 _gasLimit,
         bytes32 _donID
-    ) FunctionsClient(_router) ConfirmedOwner(msg.sender) {
+    ) FunctionsClient(router) ConfirmedOwner(msg.sender) {
         subscriptionId = _subId;
         router = _router;
-        source = _source;
+
         gasLimit = _gasLimit;
         donID = _donID;
         dataFeed = AggregatorV3Interface(
@@ -56,7 +76,7 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
     }
 
     function getChainlinkDataFeedLatestAnswer() public view returns (int256) {
-        (, int256 answer, , , ) = dataFeed.latestRoundData();
+        (, int answer, , , ) = dataFeed.latestRoundData();
         return answer;
     }
 
@@ -64,14 +84,17 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
         string[] calldata args
     ) internal onlyOwner returns (bytes32 requestId) {
         FunctionsRequest.Request memory req;
-        req.initializeRequestForInlineJavaScript(source);
-        if (args.length > 0) req.setArgs(args);
+        req.initializeRequestForInlineJavaScript(source); // Initialize the request with JS code
+        if (args.length > 0) req.setArgs(args); // Set the arguments for the request
+
+        // Send the request and store the request ID
         s_lastRequestId = _sendRequest(
             req.encodeCBOR(),
             subscriptionId,
             gasLimit,
             donID
         );
+
         return s_lastRequestId;
     }
 
@@ -81,18 +104,29 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
         bytes memory err
     ) internal override {
         if (s_lastRequestId != requestId) {
-            revert UnexpectedRequestID(requestId);
+            revert UnexpectedRequestID(requestId); // Check if request IDs match
         }
+
         s_lastResponse = response;
-        price = string(response);
+        price = convertBytesToUint(response);
         s_lastError = err;
 
-        emit Response(requestId, price, s_lastResponse, s_lastError);
+        // Emit an event to log the response
+        // emit Response(requestId, price, s_lastResponse, s_lastError);
+    }
+
+    function convertBytesToUint(
+        bytes memory response
+    ) public pure returns (uint256) {
+        uint256 newprice = abi.decode(response, (uint256));
+        return newprice;
     }
 
     function bytesToUint(bytes32 _bytes) internal pure returns (uint256) {
         return uint256(_bytes);
     }
+
+    uint256 public depositValue;
 
     function depositAndMint(
         // uint256 amountToMint,
@@ -110,6 +144,7 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
         require(msg.value > 0, "Insufficient deposit amount");
         depositedAmount[msg.sender] += msg.value;
         uint256 depositValueInUsd = (uint256(ethPriceInUsd) * msg.value) / 1e18;
+        depositValue = depositValueInUsd;
         // Calculate the maximum mintable token value based on the over-collateralization ratio
         uint256 maxMintableTokenValueInUsd = depositValueInUsd /
             OVER_COLLATERALIZATION_RATIO;
@@ -130,30 +165,15 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
         emit TokensMinted(msg.sender, tokensToMint, address(newToken));
     }
 
-    function redeemAndBurn(uint256 amountToBurn) external {
-        MintableToken token = syntheticTokens[msg.sender];
-        require(
-            address(token) != address(0),
-            "No tokens minted for this address"
-        );
-        require(
-            token.balanceOf(msg.sender) >= amountToBurn,
-            "Insufficient token balance"
-        );
-
-        uint256 usdValueOfTokens = lastStockPrice * amountToBurn;
-        int256 ethPriceInUsd = getChainlinkDataFeedLatestAnswer();
-        uint256 ethValue = (usdValueOfTokens * 1e18) / uint256(ethPriceInUsd);
-
-        token.burn(msg.sender, amountToBurn);
-
-        require(
-            depositedAmount[msg.sender] >= ethValue,
-            "Insufficient deposited amount"
-        );
-        depositedAmount[msg.sender] -= ethValue;
-
-        (bool success, ) = msg.sender.call{value: ethValue}("");
-        require(success, "ETH transfer failed");
-    }
+    // function redeemAndBurn(uint256 amountToBurn) external {
+    //     require(
+    //         syntheticTokens[msg.sender].balanceOf(msg.sender) >= amountToBurn,
+    //         "Insufficient token balance"
+    //     );
+    //     syntheticTokens[msg.sender].burn(msg.sender, amountToBurn);
+    //     uint256 redeemAmount = (amountToBurn * DEPOSIT_AMOUNT) /
+    //         syntheticTokens[msg.sender].totalSupply();
+    //     depositedAmount[msg.sender] -= redeemAmount;
+    //     payable(msg.sender).transfer(redeemAmount);
+    // }
 }
