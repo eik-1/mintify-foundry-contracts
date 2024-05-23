@@ -11,14 +11,14 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
     using FunctionsRequest for FunctionsRequest.Request;
     AggregatorV3Interface internal dataFeed;
 
-    // Custom error type
-    error UnexpectedRequestID(bytes32 requestId);
-
     // State variables to store the last request ID, response, and error
     bytes32 public s_lastRequestId;
     bytes public s_lastResponse;
     bytes public s_lastError;
+    uint64 subscriptionId;
     address public fetchData = address(this);
+    // Custom error type
+    error UnexpectedRequestID(bytes32 requestId);
 
     // Event to log responses
     event Response(
@@ -31,8 +31,8 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
     // event TokensMinted(address indexed minter, uint256 totalMintedTokens);
     event TokensMinted(address indexed user, uint256 amount, address token);
 
-    address public router;
-    uint64 public subscriptionId;
+    address router = 0xb83E47C2bC239B3bf370bc41e1459A34b41238D0;
+
     // JavaScript source code
     string source =
         "const ticker = args[0];"
@@ -47,8 +47,11 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
         "return Functions.encodeUint256(dataMultiplied);";
 
     //Callback gas limit
-    uint32 public gasLimit;
-    bytes32 public donID;
+    uint32 gasLimit = 300000;
+
+    bytes32 donID =
+        hex"66756e2d706f6c79676f6e2d616d6f792d310000000000000000000000000000";
+
     // State variable to store the returned character information
     uint256 public price;
 
@@ -60,29 +63,29 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
     uint256 constant OVER_COLLATERALIZATION_RATIO = 2; // 200% over-collateral
 
     constructor(
-        uint64 _subId,
-        address _router,
-        uint32 _gasLimit,
-        bytes32 _donID
+        uint64 _subId
     ) FunctionsClient(router) ConfirmedOwner(msg.sender) {
         subscriptionId = _subId;
-        router = _router;
-
-        gasLimit = _gasLimit;
-        donID = _donID;
         dataFeed = AggregatorV3Interface(
-            0xF0d50568e3A7e8259E16663972b11910F89BD8e7
+            0x694AA1769357215DE4FAC081bf1f309aDC325306
         );
     }
 
     function getChainlinkDataFeedLatestAnswer() public view returns (int256) {
-        (, int answer, , , ) = dataFeed.latestRoundData();
+        // prettier-ignore
+        (
+            /* uint80 roundID */,
+            int answer,
+            /*uint startedAt*/,
+            /*uint timeStamp*/,
+            /*uint80 answeredInRound*/
+        ) = dataFeed.latestRoundData();
         return answer;
     }
 
     function sendRequest(
         string[] calldata args
-    ) internal onlyOwner returns (bytes32 requestId) {
+    ) internal returns (bytes32 requestId) {
         FunctionsRequest.Request memory req;
         req.initializeRequestForInlineJavaScript(source); // Initialize the request with JS code
         if (args.length > 0) req.setArgs(args); // Set the arguments for the request
@@ -140,7 +143,7 @@ contract Synthetic is FunctionsClient, ConfirmedOwner {
         lastStockPrice = stockPrice;
 
         //fetch the price of eth in usd???? using chainlink price feeds
-        int256 ethPriceInUsd = getChainlinkDataFeedLatestAnswer();
+        int256 ethPriceInUsd = getChainlinkDataFeedLatestAnswer() * 1e10;
         require(msg.value > 0, "Insufficient deposit amount");
         depositedAmount[msg.sender] += msg.value;
         uint256 depositValueInUsd = (uint256(ethPriceInUsd) * msg.value) / 1e18;
