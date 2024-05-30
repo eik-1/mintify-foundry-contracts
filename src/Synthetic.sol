@@ -39,6 +39,9 @@ contract Synthetic is
     address public user;
     bool public isNeeded = false;
 
+    // Redemption vars
+    mapping(bytes32 => address) public redeemRequests;
+
     // Custom error type
     error UnexpectedRequestID(bytes32 requestId);
 
@@ -92,7 +95,7 @@ contract Synthetic is
     // Callback gas limit
     uint32 public gasLimit = 300000;
 
-    bytes32 donID =
+    bytes32 public donID =
         0x66756e2d657468657265756d2d7365706f6c69612d3100000000000000000000; // sepolia network
     //0x66756e2d706f6c79676f6e2d616d6f792d310000000000000000000000000000; // amoy network
     // 0x66756e2d617262697472756d2d7365706f6c69612d3100000000000000000000; //arb-sepolia
@@ -153,7 +156,7 @@ contract Synthetic is
     // ***************************************************************
 
     function sendRequest(
-        string[] calldata args
+        string[] memory args
     ) internal returns (bytes32 requestId) {
         emit DebugLog("Sending request...");
         FunctionsRequest.Request memory req;
@@ -198,9 +201,23 @@ contract Synthetic is
 
         stockPrice = newPrice * 1e16;
         s_lastError = err;
-        stockTokensToMint(ethPriceInUsd, stockPrice);
-        isNeeded = true;
-        emit Testresponse(user, newStockName, newStockSymbol, NoOFTokensToMint);
+
+        // Check if it's a redeem request
+        address redeemer = redeemRequests[requestId];
+        if (redeemer != address(0)) {
+            completeRedemption(redeemer, newPrice);
+            delete redeemRequests[requestId];
+        } else {
+            stockTokensToMint(ethPriceInUsd, stockPrice);
+            isNeeded = true;
+            emit Testresponse(
+                user,
+                newStockName,
+                newStockSymbol,
+                NoOFTokensToMint
+            );
+        }
+
         emit DebugBytes("Fulfill Response", response);
         emit DebugBytes("Fulfill Error", err);
     }
@@ -245,6 +262,56 @@ contract Synthetic is
 
         walletToContractAddresses[_user].push(address(newToken));
         emit TokensMinted(_user, tokensToMint, address(newToken));
+    }
+
+    // ***************************************************************
+    // ********************** REDEEM FUNCTION ************************
+    // ***************************************************************
+
+    function redeem(
+        address _tokenAddress,
+        uint256 _amountToRedeem,
+        string memory _symbol
+    ) public {
+        MintableToken token = syntheticTokens[msg.sender];
+        require(address(token) == _tokenAddress, "Invalid token address");
+
+        // Ensure the user has enough tokens to redeem
+        uint256 tokenBalance = token.balanceOf(msg.sender);
+        require(tokenBalance >= _amountToRedeem, "Insufficient token balance");
+
+        string[] memory symbols = new string[](1);
+        symbols[0] = _symbol;
+
+        // Send a request for the stock price and store the request ID
+        bytes32 requestId = sendRequest(symbols);
+        redeemRequests[requestId] = msg.sender;
+
+        emit DebugLog("Redeem request sent");
+    }
+
+    function completeRedemption(address redeemer, uint256 newPrice) internal {
+        MintableToken token = syntheticTokens[redeemer];
+
+        // Get the user's token balance
+        uint256 tokenBalance = token.balanceOf(redeemer);
+        require(tokenBalance > 0, "No tokens to redeem");
+
+        // Calculate the ETH amount to be redeemed based on the token amount
+        uint256 ethAmount = (tokenBalance * newPrice) / 1e18;
+
+        // Transfer the ETH to the user
+        payable(redeemer).transfer(ethAmount);
+
+        // Burn the specified amount of tokens
+        token.burn(redeemer, tokenBalance);
+
+        // If the user has no tokens left, remove the token contract from the mapping
+        if (token.balanceOf(redeemer) == 0) {
+            delete syntheticTokens[redeemer];
+        }
+
+        emit DebugLog("Redemption complete");
     }
 
     // ***************************************************************
